@@ -1,0 +1,81 @@
+.entry-editor {
+    max-width: 900px;
+    margin: 0 auto;
+}
+
+.editor-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: var(--space-xl);
+    flex-wrap: wrap;
+    gap: var(--space-md);
+}
+
+.editor-actions {
+    display: flex;
+    align-items: center;
+    gap: var(--space-sm);
+    flex-wrap: wrap;
+}
+
+.word-count {
+    font-size: 0.8rem;
+    color: var(--color-text-muted);
+    padding: 4px 12px;
+    background: var(--color-bg-tertiary);
+    border-radius: var(--border-radius-full);
+}
+
+.auto-save-indicator {
+    font-size: 0.75rem;
+    color: var(--color-success);
+}
+
+.editor-form {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-lg);
+}
+
+.editor-title-input {
+    font-size: 1.25rem !important;
+    font-weight: 600;
+    font-family: var(--font-heading);
+}
+
+.editor-toolbar {
+    display: flex;
+    gap: 4px;
+    padding: 8px 12px;
+    background: var(--color-bg-secondary);
+    border: 1px solid var(--color-border);
+    border-radius: var(--border-radius) var(--border-radius) 0 0;
+}
+
+.toolbar-btn {
+    width: 32px;
+    height: 32px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: var(--border-radius-sm);
+    color: var(--color-text-secondary);
+    font-size: 0.9rem;
+    transition: all var(--transition-fast);
+}
+
+.toolbar-btn:hover {
+    background: var(--color-bg-hover);
+    color: var(--color-text-primary);
+}
+
+.editor-textarea {
+    min-height: 450px;
+    border-radius: 0 0 var(--border-radius) var(--border-radius) !important;
+    border-top: none !important;
+    line-height: 1.9;
+    font-size: 1rem;
+    resize: vertical;
+    font-family: var(--font-body);
+}
