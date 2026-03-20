@@ -37,10 +37,19 @@ export default function RegisterPage() {
                 email: form.email,
                 password: form.password
             });
+
+            // Sync with backend before proceeding
+            import('../../api/api').then(apiModule => {
+                apiModule.default.post('/auth/sync', {
+                    username: form.username,
+                    displayName: form.displayName || form.username
+                });
+            });
+
             toast.success('Account created! Welcome to Writer\'s Hub');
             navigate('/dashboard');
         } catch (err) {
-            setError(err.response?.data?.error || 'Registration failed');
+            setError(err.error_description || err.message || 'Registration failed');
         } finally {
             setLoading(false);
         }

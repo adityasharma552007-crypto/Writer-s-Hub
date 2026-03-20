@@ -25,8 +25,9 @@ export default function EntryEditorPage() {
     const autoSaveRef = useRef(null);
 
     useEffect(() => {
-        if (user) {
-            api.get(`/shelves/user/${user._id}`).then(({ data }) => setShelves(data)).catch(() => { });
+        const userId = user?.id || user?._id;
+        if (userId) {
+            api.get(`/shelves/user/${userId}`).then(({ data }) => setShelves(data)).catch(() => { });
         }
     }, [user]);
 

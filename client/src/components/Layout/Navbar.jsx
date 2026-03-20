@@ -10,16 +10,21 @@ export default function Navbar() {
     const [search, setSearch] = useState('');
     const [showDropdown, setShowDropdown] = useState(false);
     const [unreadCount, setUnreadCount] = useState(0);
+    const [hasFetchError, setHasFetchError] = useState(false);
     const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
     const dropdownRef = useRef(null);
 
     useEffect(() => {
-        if (user) {
+        const userId = user?.id || user?._id;
+        if (userId && !hasFetchError) {
             api.get('/notifications/unread-count')
                 .then(({ data }) => setUnreadCount(data.count))
-                .catch(() => { });
+                .catch((err) => { 
+                    console.error('Failed to fetch unread count:', err);
+                    setHasFetchError(true);
+                });
         }
-    }, [user]);
+    }, [user, hasFetchError]);
 
     useEffect(() => {
         const handleClick = (e) => {

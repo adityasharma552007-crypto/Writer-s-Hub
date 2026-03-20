@@ -1,5 +1,5 @@
 const router = require('express').Router();
-const Notification = require('../models/Notification');
+const { supabase } = require('../supabaseClient');
 const { auth } = require('../middleware/auth');
 
 // List notifications
@@ -9,23 +9,41 @@ router.get('/', auth, async (req, res) => {
         const limit = parseInt(req.query.limit) || 20;
         const skip = (page - 1) * limit;
 
-        const notifications = await Notification.find({ recipient: req.user.id })
-            .populate('sender', 'username displayName avatar')
-            .sort({ createdAt: -1 })
-            .skip(skip)
-            .limit(limit);
+        const { data: notifications, error, count: total } = await supabase
+            .from('notifications')
+            .select('*, sender:profiles!notifications_sender_fkey(id, username, display_name, avatar)', { count: 'exact' })
+            .eq('recipient', req.user.id)
+            .order('created_at', { ascending: false })
+            .range(skip, skip + limit - 1);
 
-        const total = await Notification.countDocuments({ recipient: req.user.id });
-        const unreadCount = await Notification.countDocuments({ recipient: req.user.id, read: false });
+        if (error) throw error;
+
+        const { count: unreadCount } = await supabase
+            .from('notifications')
+            .select('*', { count: 'exact', head: true })
+            .eq('recipient', req.user.id)
+            .eq('read', false);
 
         res.json({
-            notifications,
-            unreadCount,
+            notifications: notifications.map(n => ({
+                ...n,
+                _id: n.id,
+                createdAt: n.created_at,
+                updatedAt: n.updated_at,
+                sender: n.sender ? {
+                    _id: n.sender.id,
+                    username: n.sender.username,
+                    displayName: n.sender.display_name,
+                    avatar: n.sender.avatar
+                } : null
+            })),
+            unreadCount: unreadCount || 0,
             page,
-            totalPages: Math.ceil(total / limit),
-            total
+            totalPages: Math.ceil((total || 0) / limit),
+            total: total || 0
         });
     } catch (error) {
+        console.error('[Notifications] GET / error:', error);
         res.status(500).json({ error: error.message });
     }
 });
@@ -33,20 +51,33 @@ router.get('/', auth, async (req, res) => {
 // Get unread count
 router.get('/unread-count', auth, async (req, res) => {
     try {
-        const count = await Notification.countDocuments({ recipient: req.user.id, read: false });
-        res.json({ count });
+        const userId = req.user.id;
+        
+        const { count, error } = await supabase
+            .from('notifications')
+            .select('*', { count: 'exact', head: true })
+            .eq('recipient', userId)
+            .eq('read', false);
+
+        if (error) throw error;
+        
+        res.json({ count: count || 0 });
     } catch (error) {
-        res.status(500).json({ error: error.message });
+        console.error('[Notifications] GET /unread-count error:', error);
+        res.status(500).json({ error: error.message || 'Error fetching unread count' });
     }
 });
 
 // Mark single as read
 router.put('/:id/read', auth, async (req, res) => {
     try {
-        await Notification.findOneAndUpdate(
-            { _id: req.params.id, recipient: req.user.id },
-            { read: true }
-        );
+        const { error } = await supabase
+            .from('notifications')
+            .update({ read: true, updated_at: new Date().toISOString() })
+            .eq('id', req.params.id)
+            .eq('recipient', req.user.id);
+            
+        if (error) throw error;
         res.json({ message: 'Marked as read' });
     } catch (error) {
         res.status(500).json({ error: error.message });
@@ -56,10 +87,13 @@ router.put('/:id/read', auth, async (req, res) => {
 // Mark all as read
 router.put('/read-all', auth, async (req, res) => {
     try {
-        await Notification.updateMany(
-            { recipient: req.user.id, read: false },
-            { read: true }
-        );
+        const { error } = await supabase
+            .from('notifications')
+            .update({ read: true, updated_at: new Date().toISOString() })
+            .eq('recipient', req.user.id)
+            .eq('read', false);
+            
+        if (error) throw error;
         res.json({ message: 'All notifications marked as read' });
     } catch (error) {
         res.status(500).json({ error: error.message });

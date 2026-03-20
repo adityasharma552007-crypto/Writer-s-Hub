@@ -1,6 +1,5 @@
 const router = require('express').Router();
-const User = require('../models/User');
-const Shelf = require('../models/Shelf');
+const { supabase } = require('../supabaseClient');
 const { auth, optionalAuth } = require('../middleware/auth');
 const { uploadAvatar, uploadCover } = require('../middleware/upload');
 const { createNotification } = require('../utils/notify');
@@ -8,33 +7,41 @@ const { createNotification } = require('../utils/notify');
 // Get user profile by username
 router.get('/:username', optionalAuth, async (req, res) => {
     try {
-        const user = await User.findOne({
-            username: req.params.username.toLowerCase(),
-            deactivated: false
-        }).select('-password');
+        const { data: user, error: userError } = await supabase
+            .from('profiles')
+            .select('*')
+            .ilike('username', req.params.username)
+            .single();
 
-        if (!user) {
+        if (userError || !user) {
             return res.status(404).json({ error: 'User not found' });
         }
 
         // Get public shelves (or all if owner)
-        const isOwner = req.user && req.user.id === user._id.toString();
-        const shelfQuery = { owner: user._id };
+        const isOwner = req.user && req.user.id === user.id;
+        
+        let shelfQuery = supabase
+            .from('shelves')
+            .select('*')
+            .eq('owner', user.id)
+            .order('order', { ascending: true });
+            
         if (!isOwner) {
-            shelfQuery.visibility = 'public';
-            shelfQuery.archived = false;
+            shelfQuery = shelfQuery.eq('visibility', 'public').eq('archived', false);
         }
-        const shelves = await Shelf.find(shelfQuery).sort({ order: 1 });
+        
+        const { data: shelves } = await shelfQuery;
 
         res.json({
-            user,
-            shelves,
+            user: { ...user, _id: user.id },
+            shelves: shelves ? shelves.map(s => ({ ...s, _id: s.id, coverImage: s.cover_image, genreTags: s.genre_tags })) : [],
             isOwner,
-            followerCount: user.followers.length,
-            followingCount: user.following.length,
-            isFollowing: req.user ? user.followers.includes(req.user.id) : false
+            followerCount: (user.followers || []).length,
+            followingCount: (user.following || []).length,
+            isFollowing: req.user ? (user.followers || []).includes(req.user.id) : false
         });
     } catch (error) {
+        console.error('[Users API]', error);
         res.status(500).json({ error: error.message });
     }
 });
@@ -42,22 +49,28 @@ router.get('/:username', optionalAuth, async (req, res) => {
 // Update profile
 router.put('/profile', auth, async (req, res) => {
     try {
-        const allowedUpdates = [
-            'displayName', 'bio', 'genreTags', 'socialLinks',
-            'showStats', 'theme', 'privacySettings', 'notificationSettings'
-        ];
+        const allowedUpdates = {
+            displayName: 'display_name',
+            bio: 'bio',
+            genreTags: 'genre_tags'
+        };
+        
         const updates = {};
-        for (const key of allowedUpdates) {
-            if (req.body[key] !== undefined) {
-                updates[key] = req.body[key];
+        for (const [clientKey, dbKey] of Object.entries(allowedUpdates)) {
+            if (req.body[clientKey] !== undefined) {
+                updates[dbKey] = req.body[clientKey];
             }
         }
 
-        const user = await User.findByIdAndUpdate(req.user.id, updates, {
-            new: true, runValidators: true
-        }).select('-password');
+        const { data: user, error } = await supabase
+            .from('profiles')
+            .update(updates)
+            .eq('id', req.user.id)
+            .select()
+            .single();
 
-        res.json(user);
+        if (error) throw error;
+        res.json({ ...user, _id: user.id });
     } catch (error) {
         res.status(500).json({ error: error.message });
     }
@@ -69,12 +82,17 @@ router.post('/avatar', auth, uploadAvatar, async (req, res) => {
         if (!req.file) {
             return res.status(400).json({ error: 'No image uploaded' });
         }
-        const user = await User.findByIdAndUpdate(
-            req.user.id,
-            { avatar: `/uploads/${req.file.filename}` },
-            { new: true }
-        ).select('-password');
-        res.json(user);
+        const filePath = `/uploads/${req.file.filename}`;
+        
+        const { data: user, error } = await supabase
+            .from('profiles')
+            .update({ avatar: filePath })
+            .eq('id', req.user.id)
+            .select()
+            .single();
+            
+        if (error) throw error;
+        res.json({ ...user, _id: user.id });
     } catch (error) {
         res.status(500).json({ error: error.message });
     }
@@ -86,12 +104,17 @@ router.post('/banner', auth, uploadCover, async (req, res) => {
         if (!req.file) {
             return res.status(400).json({ error: 'No image uploaded' });
         }
-        const user = await User.findByIdAndUpdate(
-            req.user.id,
-            { banner: `/uploads/${req.file.filename}` },
-            { new: true }
-        ).select('-password');
-        res.json(user);
+        const filePath = `/uploads/${req.file.filename}`;
+        
+        const { data: user, error } = await supabase
+            .from('profiles')
+            .update({ banner: filePath })
+            .eq('id', req.user.id)
+            .select()
+            .single();
+            
+        if (error) throw error;
+        res.json({ ...user, _id: user.id });
     } catch (error) {
         res.status(500).json({ error: error.message });
     }
@@ -100,28 +123,47 @@ router.post('/banner', auth, uploadCover, async (req, res) => {
 // Follow user
 router.post('/:username/follow', auth, async (req, res) => {
     try {
-        const targetUser = await User.findOne({ username: req.params.username.toLowerCase() });
+        const { data: targetUser } = await supabase
+            .from('profiles')
+            .select('id, followers')
+            .ilike('username', req.params.username)
+            .single();
+
         if (!targetUser) {
             return res.status(404).json({ error: 'User not found' });
         }
 
-        if (targetUser._id.toString() === req.user.id) {
+        if (targetUser.id === req.user.id) {
             return res.status(400).json({ error: 'Cannot follow yourself' });
         }
 
-        if (targetUser.followers.includes(req.user.id)) {
+        const followers = targetUser.followers || [];
+        if (followers.includes(req.user.id)) {
             return res.status(400).json({ error: 'Already following this user' });
         }
 
-        await User.findByIdAndUpdate(targetUser._id, { $push: { followers: req.user.id } });
-        await User.findByIdAndUpdate(req.user.id, { $push: { following: targetUser._id } });
+        // Add to target user's followers
+        await supabase.from('profiles').update({ 
+            followers: [...followers, req.user.id] 
+        }).eq('id', targetUser.id);
 
-        const currentUser = await User.findById(req.user.id).select('displayName username');
+        // Add to current user's following
+        const { data: currentUser } = await supabase
+            .from('profiles')
+            .select('id, username, display_name, following')
+            .eq('id', req.user.id)
+            .single();
+            
+        const following = currentUser.following || [];
+        await supabase.from('profiles').update({ 
+            following: [...following, targetUser.id] 
+        }).eq('id', req.user.id);
+
         await createNotification({
-            recipient: targetUser._id,
+            recipient: targetUser.id,
             sender: req.user.id,
             type: 'follow',
-            message: `${currentUser.displayName || currentUser.username} started following you`,
+            message: `${currentUser.display_name || currentUser.username} started following you`,
             link: `/profile/${currentUser.username}`
         });
 
@@ -134,13 +176,27 @@ router.post('/:username/follow', auth, async (req, res) => {
 // Unfollow user
 router.delete('/:username/follow', auth, async (req, res) => {
     try {
-        const targetUser = await User.findOne({ username: req.params.username.toLowerCase() });
+        const { data: targetUser } = await supabase
+            .from('profiles')
+            .select('id, followers')
+            .ilike('username', req.params.username)
+            .single();
+
         if (!targetUser) {
             return res.status(404).json({ error: 'User not found' });
         }
 
-        await User.findByIdAndUpdate(targetUser._id, { $pull: { followers: req.user.id } });
-        await User.findByIdAndUpdate(req.user.id, { $pull: { following: targetUser._id } });
+        const followers = (targetUser.followers || []).filter(id => id !== req.user.id);
+        await supabase.from('profiles').update({ followers }).eq('id', targetUser.id);
+
+        const { data: currentUser } = await supabase
+            .from('profiles')
+            .select('following')
+            .eq('id', req.user.id)
+            .single();
+            
+        const following = (currentUser.following || []).filter(id => id !== targetUser.id);
+        await supabase.from('profiles').update({ following }).eq('id', req.user.id);
 
         res.json({ message: 'Unfollowed successfully' });
     } catch (error) {
@@ -148,33 +204,14 @@ router.delete('/:username/follow', auth, async (req, res) => {
     }
 });
 
-// Update password
+// Update password (Disabled: Now handled directly by Supabase Auth on the frontend)
 router.put('/password', auth, async (req, res) => {
-    try {
-        const { currentPassword, newPassword } = req.body;
-        const user = await User.findById(req.user.id);
-
-        const isMatch = await user.comparePassword(currentPassword);
-        if (!isMatch) {
-            return res.status(400).json({ error: 'Current password is incorrect' });
-        }
-
-        user.password = newPassword;
-        await user.save();
-        res.json({ message: 'Password updated successfully' });
-    } catch (error) {
-        res.status(500).json({ error: error.message });
-    }
+    res.status(400).json({ error: 'Password updates should be handled via Supabase client' });
 });
 
-// Deactivate account
+// Deactivate account (Disabled: Handled differently in Supabase mapping)
 router.put('/deactivate', auth, async (req, res) => {
-    try {
-        await User.findByIdAndUpdate(req.user.id, { deactivated: true });
-        res.json({ message: 'Account deactivated' });
-    } catch (error) {
-        res.status(500).json({ error: error.message });
-    }
+    res.status(400).json({ error: 'Account deactivation should be handled via Supabase API' });
 });
 
 module.exports = router;

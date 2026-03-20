@@ -1,6 +1,5 @@
 const router = require('express').Router();
-const Shelf = require('../models/Shelf');
-const Entry = require('../models/Entry');
+const { supabase } = require('../supabaseClient');
 const { auth, optionalAuth } = require('../middleware/auth');
 const { uploadCover } = require('../middleware/upload');
 
@@ -12,19 +11,30 @@ router.post('/', auth, async (req, res) => {
             return res.status(400).json({ error: 'Title is required' });
         }
 
-        const count = await Shelf.countDocuments({ owner: req.user.id });
-        const shelf = await Shelf.create({
-            owner: req.user.id,
-            title,
-            description,
-            visibility,
-            status,
-            genreTags,
-            order: count
-        });
+        const { count } = await supabase
+            .from('shelves')
+            .select('*', { count: 'exact', head: true })
+            .eq('owner', req.user.id);
 
-        res.status(201).json(shelf);
+        const { data: shelf, error } = await supabase
+            .from('shelves')
+            .insert({
+                owner: req.user.id,
+                title,
+                description,
+                visibility: visibility || 'public',
+                status: status || 'ongoing',
+                genre_tags: genreTags || [],
+                order: count || 0
+            })
+            .select()
+            .single();
+
+        if (error) throw error;
+        // Supabase returns genre_tags, map it to front end genreTags
+        res.status(201).json({ ...shelf, genreTags: shelf.genre_tags });
     } catch (error) {
+        console.error('[Shelves] POST / error:', error);
         res.status(500).json({ error: error.message });
     }
 });
@@ -32,44 +42,89 @@ router.post('/', auth, async (req, res) => {
 // Get shelves by user
 router.get('/user/:userId', optionalAuth, async (req, res) => {
     try {
-        const query = { owner: req.params.userId };
-        const isOwner = req.user && req.user.id === req.params.userId;
+        const userId = req.params.userId;
+        const isOwner = req.user && req.user.id === userId;
+
+        let query = supabase.from('shelves').select('*').eq('owner', userId).order('order', { ascending: true });
+        
         if (!isOwner) {
-            query.visibility = 'public';
-            query.archived = false;
+            query = query.eq('visibility', 'public').eq('archived', false);
         }
 
-        const shelves = await Shelf.find(query).sort({ order: 1 });
-        res.json(shelves);
+        const { data: shelves, error } = await query;
+        if (error) throw error;
+
+        // Map camelCase for frontend
+        const mapped = shelves.map(s => ({
+            ...s,
+            _id: s.id,
+            genreTags: s.genre_tags,
+            coverImage: s.cover_image
+        }));
+
+        res.json(mapped);
     } catch (error) {
-        res.status(500).json({ error: error.message });
+        console.error('[Shelves] GET /user/:userId error:', error);
+        res.status(500).json({ error: error.message || 'Internal server error while fetching shelves' });
     }
 });
 
 // Get single shelf with entries
 router.get('/:id', optionalAuth, async (req, res) => {
     try {
-        const shelf = await Shelf.findById(req.params.id).populate('owner', 'username displayName avatar');
-        if (!shelf) {
-            return res.status(404).json({ error: 'Shelf not found' });
-        }
+        const { data: shelf, error: shelfErr } = await supabase
+            .from('shelves')
+            .select('*, owner:profiles!shelves_owner_fkey(id, username, display_name, avatar)')
+            .eq('id', req.params.id)
+            .single();
 
-        const isOwner = req.user && req.user.id === shelf.owner._id.toString();
+        if (shelfErr) throw shelfErr;
+        if (!shelf) return res.status(404).json({ error: 'Shelf not found' });
+
+        const isOwner = req.user && req.user.id === shelf.owner.id;
         if (!isOwner && shelf.visibility !== 'public') {
             return res.status(404).json({ error: 'Shelf not found' });
         }
 
-        const entryQuery = { shelf: shelf._id };
+        let entryQuery = supabase
+            .from('entries')
+            .select('id, title, word_count, visibility, tags, created_at, updated_at, order, likes_count')
+            .eq('shelf', shelf.id)
+            .order('order', { ascending: true });
+
         if (!isOwner) {
-            entryQuery.visibility = 'published';
+            entryQuery = entryQuery.eq('visibility', 'published');
         }
 
-        const entries = await Entry.find(entryQuery)
-            .select('title wordCount visibility tags createdAt updatedAt order likesCount')
-            .sort({ order: 1 });
+        const { data: entries, error: entryErr } = await entryQuery;
+        if (entryErr) throw entryErr;
 
-        res.json({ shelf, entries, isOwner });
+        // Map response for frontend
+        res.json({ 
+            shelf: {
+                ...shelf,
+                _id: shelf.id,
+                genreTags: shelf.genre_tags,
+                coverImage: shelf.cover_image,
+                owner: {
+                    _id: shelf.owner.id,
+                    username: shelf.owner.username,
+                    displayName: shelf.owner.display_name,
+                    avatar: shelf.owner.avatar
+                }
+            }, 
+            entries: entries.map(e => ({
+                ...e,
+                _id: e.id,
+                wordCount: e.word_count,
+                createdAt: e.created_at,
+                updatedAt: e.updated_at,
+                likesCount: e.likes_count
+            })), 
+            isOwner 
+        });
     } catch (error) {
+        console.error('[Shelves] GET /:id error:', error);
         res.status(500).json({ error: error.message });
     }
 });
@@ -77,23 +132,27 @@ router.get('/:id', optionalAuth, async (req, res) => {
 // Update shelf
 router.put('/:id', auth, async (req, res) => {
     try {
-        const shelf = await Shelf.findById(req.params.id);
-        if (!shelf) {
-            return res.status(404).json({ error: 'Shelf not found' });
-        }
-        if (shelf.owner.toString() !== req.user.id) {
-            return res.status(403).json({ error: 'Not authorized' });
-        }
+        const { data: shelfCheck, error: checkErr } = await supabase.from('shelves').select('owner').eq('id', req.params.id).single();
+        if (checkErr || !shelfCheck) return res.status(404).json({ error: 'Shelf not found' });
+        if (shelfCheck.owner !== req.user.id) return res.status(403).json({ error: 'Not authorized' });
 
-        const allowedUpdates = ['title', 'description', 'visibility', 'status', 'genreTags', 'archived'];
+        const updates = {};
+        const allowedUpdates = ['title', 'description', 'visibility', 'status', 'archived'];
         for (const key of allowedUpdates) {
-            if (req.body[key] !== undefined) {
-                shelf[key] = req.body[key];
-            }
+            if (req.body[key] !== undefined) updates[key] = req.body[key];
         }
+        if (req.body.genreTags !== undefined) updates.genre_tags = req.body.genreTags;
+        updates.updated_at = new Date().toISOString();
 
-        await shelf.save();
-        res.json(shelf);
+        const { data: shelf, error } = await supabase
+            .from('shelves')
+            .update(updates)
+            .eq('id', req.params.id)
+            .select()
+            .single();
+
+        if (error) throw error;
+        res.json({ ...shelf, _id: shelf.id, genreTags: shelf.genre_tags, coverImage: shelf.cover_image });
     } catch (error) {
         res.status(500).json({ error: error.message });
     }
@@ -102,13 +161,19 @@ router.put('/:id', auth, async (req, res) => {
 // Upload shelf cover
 router.post('/:id/cover', auth, uploadCover, async (req, res) => {
     try {
-        const shelf = await Shelf.findById(req.params.id);
-        if (!shelf || shelf.owner.toString() !== req.user.id) {
-            return res.status(403).json({ error: 'Not authorized' });
-        }
-        shelf.coverImage = `/uploads/${req.file.filename}`;
-        await shelf.save();
-        res.json(shelf);
+        const { data: shelfCheck, error: checkErr } = await supabase.from('shelves').select('owner').eq('id', req.params.id).single();
+        if (checkErr || !shelfCheck) return res.status(404).json({ error: 'Shelf not found' });
+        if (shelfCheck.owner !== req.user.id) return res.status(403).json({ error: 'Not authorized' });
+
+        const { data: shelf, error } = await supabase
+            .from('shelves')
+            .update({ cover_image: `/uploads/${req.file.filename}`, updated_at: new Date().toISOString() })
+            .eq('id', req.params.id)
+            .select()
+            .single();
+
+        if (error) throw error;
+        res.json({ ...shelf, _id: shelf.id, coverImage: shelf.cover_image });
     } catch (error) {
         res.status(500).json({ error: error.message });
     }
@@ -119,10 +184,7 @@ router.put('/reorder', auth, async (req, res) => {
     try {
         const { shelfIds } = req.body;
         for (let i = 0; i < shelfIds.length; i++) {
-            await Shelf.findOneAndUpdate(
-                { _id: shelfIds[i], owner: req.user.id },
-                { order: i }
-            );
+            await supabase.from('shelves').update({ order: i }).eq('id', shelfIds[i]).eq('owner', req.user.id);
         }
         res.json({ message: 'Shelves reordered' });
     } catch (error) {
@@ -130,19 +192,15 @@ router.put('/reorder', auth, async (req, res) => {
     }
 });
 
-// Delete shelf (cascade entries)
+// Delete shelf (cascade handles entries implicitly if set up in DB)
 router.delete('/:id', auth, async (req, res) => {
     try {
-        const shelf = await Shelf.findById(req.params.id);
-        if (!shelf) {
-            return res.status(404).json({ error: 'Shelf not found' });
-        }
-        if (shelf.owner.toString() !== req.user.id) {
-            return res.status(403).json({ error: 'Not authorized' });
-        }
+        const { data: shelfCheck, error: checkErr } = await supabase.from('shelves').select('owner').eq('id', req.params.id).single();
+        if (checkErr || !shelfCheck) return res.status(404).json({ error: 'Shelf not found' });
+        if (shelfCheck.owner !== req.user.id) return res.status(403).json({ error: 'Not authorized' });
 
-        await Entry.deleteMany({ shelf: shelf._id });
-        await Shelf.findByIdAndDelete(shelf._id);
+        const { error } = await supabase.from('shelves').delete().eq('id', req.params.id);
+        if (error) throw error;
 
         res.json({ message: 'Shelf and entries deleted' });
     } catch (error) {

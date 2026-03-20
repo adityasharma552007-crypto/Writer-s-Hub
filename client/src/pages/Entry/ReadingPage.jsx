@@ -192,7 +192,7 @@ function CommentSectionInline({ entryId, commentsEnabled, entryAuthorId }) {
                             <span style={{ color: 'var(--color-text-muted)', fontSize: '0.8rem' }}>{new Date(c.createdAt).toLocaleDateString()}</span>
                         </div>
                         <p>{c.body}</p>
-                        {(user && (c.author?._id === user._id || entryAuthorId === user._id)) && (
+                        {(user && (c.author?._id === (user.id || user._id) || entryAuthorId === (user.id || user._id))) && (
                             <button className="btn btn-ghost btn-sm" onClick={() => handleDelete(c._id)} style={{ fontSize: '0.75rem' }}>Delete</button>
                         )}
                     </div>

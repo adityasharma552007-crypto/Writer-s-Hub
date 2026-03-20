@@ -16,17 +16,22 @@ export default function DashboardPage() {
     const [showCreateModal, setShowCreateModal] = useState(false);
     const [newShelf, setNewShelf] = useState({ title: '', description: '', visibility: 'public', status: 'ongoing', genreTags: '' });
     const [creating, setCreating] = useState(false);
+    const [hasFetchError, setHasFetchError] = useState(false);
 
     useEffect(() => {
-        if (user) fetchShelves();
-    }, [user]);
+        if ((user?.id || user?._id) && !hasFetchError) fetchShelves();
+    }, [user, hasFetchError]);
 
     const fetchShelves = async () => {
+        const userId = user?.id || user?._id;
+        if (!userId) return;
         try {
-            const { data } = await api.get(`/shelves/user/${user._id}`);
+            const { data } = await api.get(`/shelves/user/${userId}`);
             setShelves(data);
         } catch (err) {
+            console.error('Failed to fetch shelves:', err);
             toast.error('Failed to load shelves');
+            setHasFetchError(true);
         } finally {
             setLoading(false);
         }

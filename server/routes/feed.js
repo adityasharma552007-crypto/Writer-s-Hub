@@ -1,6 +1,5 @@
 const router = require('express').Router();
-const Entry = require('../models/Entry');
-const User = require('../models/User');
+const { supabase } = require('../supabaseClient');
 const { auth } = require('../middleware/auth');
 
 // Get personalized feed
@@ -10,52 +9,78 @@ router.get('/', auth, async (req, res) => {
         const limit = parseInt(req.query.limit) || 20;
         const skip = (page - 1) * limit;
 
-        const user = await User.findById(req.user.id);
+        const { data: user, error: userError } = await supabase
+            .from('profiles')
+            .select('following, genre_tags')
+            .eq('id', req.user.id)
+            .single();
+
+        if (userError) throw userError;
+
         const following = user.following || [];
 
         // Following feed
-        const followingEntries = await Entry.find({
-            author: { $in: following },
-            visibility: 'published'
-        })
-            .populate('author', 'username displayName avatar')
-            .populate('shelf', 'title')
-            .sort({ createdAt: -1 })
-            .skip(skip)
-            .limit(limit);
-
-        // Trending (most liked in last 7 days)
-        const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
-        const trending = await Entry.find({
-            visibility: 'published',
-            createdAt: { $gte: sevenDaysAgo }
-        })
-            .populate('author', 'username displayName avatar')
-            .populate('shelf', 'title')
-            .sort({ likesCount: -1 })
-            .limit(10);
-
-        // Suggestions based on user genre tags
-        let suggestions = [];
-        if (user.genreTags && user.genreTags.length > 0) {
-            suggestions = await Entry.find({
-                visibility: 'published',
-                tags: { $in: user.genreTags },
-                author: { $nin: [...following, req.user.id] }
-            })
-                .populate('author', 'username displayName avatar')
-                .populate('shelf', 'title')
-                .sort({ likesCount: -1, createdAt: -1 })
-                .limit(10);
+        let followingEntries = [];
+        if (following.length > 0) {
+            const { data: fData } = await supabase
+                .from('entries')
+                .select('*, author:profiles!entries_author_fkey(id, username, display_name, avatar), shelf:shelves!entries_shelf_fkey(title)')
+                .in('author', following)
+                .eq('visibility', 'published')
+                .order('created_at', { ascending: false })
+                .range(skip, skip + limit - 1);
+            followingEntries = fData || [];
         }
 
+        // Trending (most liked in last 7 days)
+        const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
+        const { data: trendingData } = await supabase
+            .from('entries')
+            .select('*, author:profiles!entries_author_fkey(id, username, display_name, avatar), shelf:shelves!entries_shelf_fkey(title)')
+            .eq('visibility', 'published')
+            .gte('created_at', sevenDaysAgo)
+            .order('likes_count', { ascending: false })
+            .limit(10);
+
+        // Suggestions based on user genre tags (overlap)
+        let suggestions = [];
+        if (user.genre_tags && user.genre_tags.length > 0) {
+            const excludeIds = [...following, req.user.id];
+            // Supabase overlaps array syntax
+            const { data: sData } = await supabase
+                .from('entries')
+                .select('*, author:profiles!entries_author_fkey(id, username, display_name, avatar), shelf:shelves!entries_shelf_fkey(title)')
+                .eq('visibility', 'published')
+                .overlaps('tags', user.genre_tags)
+                .not('author', 'in', `(${excludeIds.join(',')})`)
+                .order('likes_count', { ascending: false })
+                .order('created_at', { ascending: false })
+                .limit(10);
+            suggestions = sData || [];
+        }
+
+        const mapEntry = (e) => ({
+            ...e,
+            _id: e.id,
+            wordCount: e.word_count,
+            likesCount: e.likes_count,
+            createdAt: e.created_at,
+            author: e.author ? {
+                _id: e.author.id,
+                username: e.author.username,
+                displayName: e.author.display_name,
+                avatar: e.author.avatar
+            } : null
+        });
+
         res.json({
-            following: followingEntries,
-            trending,
-            suggestions,
+            following: followingEntries.map(mapEntry),
+            trending: (trendingData || []).map(mapEntry),
+            suggestions: suggestions.map(mapEntry),
             page
         });
     } catch (error) {
+        console.error('[Feed] GET / error:', error);
         res.status(500).json({ error: error.message });
     }
 });
@@ -70,33 +95,44 @@ router.get('/trending', async (req, res) => {
         const skip = (page - 1) * limit;
 
         const periodDays = period === 'month' ? 30 : 7;
-        const dateThreshold = new Date(Date.now() - periodDays * 24 * 60 * 60 * 1000);
+        const dateThreshold = new Date(Date.now() - periodDays * 24 * 60 * 60 * 1000).toISOString();
 
-        const query = {
-            visibility: 'published',
-            createdAt: { $gte: dateThreshold }
-        };
+        let query = supabase
+            .from('entries')
+            .select('*, author:profiles!entries_author_fkey(id, username, display_name, avatar), shelf:shelves!entries_shelf_fkey(title)', { count: 'exact' })
+            .eq('visibility', 'published')
+            .gte('created_at', dateThreshold);
 
         if (genre) {
-            query.tags = genre;
+            query = query.contains('tags', [genre]);
         }
 
-        const entries = await Entry.find(query)
-            .populate('author', 'username displayName avatar')
-            .populate('shelf', 'title')
-            .sort({ likesCount: -1 })
-            .skip(skip)
-            .limit(limit);
+        const { data: entries, count: total, error } = await query
+            .order('likes_count', { ascending: false })
+            .range(skip, skip + limit - 1);
 
-        const total = await Entry.countDocuments(query);
+        if (error) throw error;
 
         res.json({
-            entries,
+            entries: entries.map(e => ({
+                ...e,
+                _id: e.id,
+                wordCount: e.word_count,
+                likesCount: e.likes_count,
+                createdAt: e.created_at,
+                author: e.author ? {
+                    _id: e.author.id,
+                    username: e.author.username,
+                    displayName: e.author.display_name,
+                    avatar: e.author.avatar
+                } : null
+            })),
             page,
-            totalPages: Math.ceil(total / limit),
-            total
+            totalPages: Math.ceil((total || 0) / limit),
+            total: total || 0
         });
     } catch (error) {
+        console.error('[Feed] GET /trending error:', error);
         res.status(500).json({ error: error.message });
     }
 });

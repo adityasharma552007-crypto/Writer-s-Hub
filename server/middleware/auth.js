@@ -1,6 +1,6 @@
-const jwt = require('jsonwebtoken');
+const { supabase } = require('../supabaseClient');
 
-const auth = (req, res, next) => {
+const auth = async (req, res, next) => {
     try {
         const authHeader = req.headers.authorization;
         if (!authHeader || !authHeader.startsWith('Bearer ')) {
@@ -8,22 +8,35 @@ const auth = (req, res, next) => {
         }
 
         const token = authHeader.split(' ')[1];
-        const decoded = jwt.verify(token, process.env.JWT_SECRET);
-        req.user = decoded;
+
+        // Use Supabase to verify the token
+        const { data: { user }, error } = await supabase.auth.getUser(token);
+
+        if (error || !user) {
+            return res.status(401).json({ error: 'Invalid token' });
+        }
+
+        // Just attach the Supabase user ID directly 
+        // (the profiles table uses this exact same ID as its primary key)
+        req.user = { id: user.id, email: user.email };
+
         next();
     } catch (error) {
-        return res.status(401).json({ error: 'Invalid token' });
+        return res.status(401).json({ error: 'Server Auth error' });
     }
 };
 
 // Optional auth — doesn't fail if no token, just sets req.user if present
-const optionalAuth = (req, res, next) => {
+const optionalAuth = async (req, res, next) => {
     try {
         const authHeader = req.headers.authorization;
         if (authHeader && authHeader.startsWith('Bearer ')) {
             const token = authHeader.split(' ')[1];
-            const decoded = jwt.verify(token, process.env.JWT_SECRET);
-            req.user = decoded;
+            const { data: { user } } = await supabase.auth.getUser(token);
+
+            if (user) {
+                req.user = { id: user.id, email: user.email };
+            }
         }
     } catch (error) {
         // Ignore — user simply not authenticated

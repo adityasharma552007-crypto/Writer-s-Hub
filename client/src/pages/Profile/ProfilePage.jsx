@@ -41,15 +41,16 @@ export default function ProfilePage() {
     };
 
     const handleFollow = async () => {
+        const currentUserId = currentUser?.id || currentUser?._id;
         try {
             if (isFollowing) {
                 await api.delete(`/users/${username}/follow`);
                 setIsFollowing(false);
-                setProfile(p => ({ ...p, followers: p.followers.filter(f => f !== currentUser?._id) }));
+                setProfile(p => ({ ...p, followers: p.followers.filter(f => f !== currentUserId) }));
             } else {
                 await api.post(`/users/${username}/follow`);
                 setIsFollowing(true);
-                setProfile(p => ({ ...p, followers: [...p.followers, currentUser?._id] }));
+                setProfile(p => ({ ...p, followers: [...p.followers, currentUserId] }));
             }
         } catch (err) {
             toast.error(err.response?.data?.error || 'Action failed');

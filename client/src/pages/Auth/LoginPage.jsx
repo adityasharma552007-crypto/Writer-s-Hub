@@ -25,7 +25,7 @@ export default function LoginPage() {
             toast.success('Welcome back!');
             navigate('/dashboard');
         } catch (err) {
-            setError(err.response?.data?.error || 'Login failed');
+            setError(err.error_description || err.message || 'Login failed');
         } finally {
             setLoading(false);
         }

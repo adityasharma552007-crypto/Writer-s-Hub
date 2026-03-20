@@ -1,6 +1,5 @@
 const router = require('express').Router();
-const CommunityPost = require('../models/CommunityPost');
-const Community = require('../models/Community');
+const { supabase } = require('../supabaseClient');
 const { auth } = require('../middleware/auth');
 const { createNotification } = require('../utils/notify');
 
@@ -9,31 +8,61 @@ router.post('/', auth, async (req, res) => {
     try {
         const { communityId, body, sharedEntry } = req.body;
 
-        const community = await Community.findById(communityId);
+        const { data: community } = await supabase
+            .from('communities')
+            .select('id, members')
+            .eq('id', communityId)
+            .single();
+
         if (!community) {
             return res.status(404).json({ error: 'Community not found' });
         }
-        if (!community.members.includes(req.user.id)) {
+        if (!(community.members || []).includes(req.user.id)) {
             return res.status(403).json({ error: 'Must be a member to post' });
         }
 
-        const post = await CommunityPost.create({
-            community: communityId,
-            author: req.user.id,
-            body,
-            sharedEntry: sharedEntry || null
-        });
+        const { data: post, error } = await supabase
+            .from('community_posts')
+            .insert({
+                community: communityId,
+                author: req.user.id,
+                body,
+                shared_entry: sharedEntry || null
+            })
+            .select(`
+                *,
+                author:profiles!community_posts_author_fkey(id, username, display_name, avatar),
+                shared_entry:entries!community_posts_shared_entry_fkey(
+                    id, title, body, word_count,
+                    author:profiles!entries_author_fkey(id, username, display_name)
+                )
+            `)
+            .single();
 
-        await post.populate('author', 'username displayName avatar');
-        if (post.sharedEntry) {
-            await post.populate({
-                path: 'sharedEntry',
-                select: 'title body wordCount author',
-                populate: { path: 'author', select: 'username displayName' }
-            });
-        }
+        if (error) throw error;
 
-        res.status(201).json(post);
+        // Map response to match frontend expectations
+        const mappedPost = {
+            ...post,
+            _id: post.id,
+            sharedEntry: post.shared_entry ? {
+                ...post.shared_entry,
+                _id: post.shared_entry.id,
+                wordCount: post.shared_entry.word_count,
+                author: post.shared_entry.author ? {
+                    ...post.shared_entry.author,
+                    _id: post.shared_entry.author.id,
+                    displayName: post.shared_entry.author.display_name
+                } : null
+            } : null,
+            author: post.author ? {
+                ...post.author,
+                _id: post.author.id,
+                displayName: post.author.display_name
+            } : null
+        };
+
+        res.status(201).json(mappedPost);
     } catch (error) {
         res.status(500).json({ error: error.message });
     }
@@ -44,32 +73,59 @@ router.get('/community/:communityId', async (req, res) => {
     try {
         const page = parseInt(req.query.page) || 1;
         const limit = parseInt(req.query.limit) || 20;
-        const skip = (page - 1) * limit;
+        const start = (page - 1) * limit;
+        const end = start + limit - 1;
         const filter = req.query.filter;
 
-        const query = { community: req.params.communityId };
+        let query = supabase
+            .from('community_posts')
+            .select(`
+                *,
+                author:profiles!community_posts_author_fkey(id, username, display_name, avatar),
+                shared_entry:entries!community_posts_shared_entry_fkey(
+                    id, title, body, word_count,
+                    author:profiles!entries_author_fkey(id, username, display_name)
+                )
+            `, { count: 'exact' })
+            .eq('community', req.params.communityId);
+
         if (filter === 'entryShares') {
-            query.sharedEntry = { $ne: null };
+            query = query.not('shared_entry', 'is', null);
         }
 
-        const posts = await CommunityPost.find(query)
-            .populate('author', 'username displayName avatar')
-            .populate({
-                path: 'sharedEntry',
-                select: 'title body wordCount author',
-                populate: { path: 'author', select: 'username displayName' }
-            })
-            .sort({ pinned: -1, createdAt: -1 })
-            .skip(skip)
-            .limit(limit);
+        const { data: posts, count, error } = await query
+            .order('pinned', { ascending: false })
+            .order('created_at', { ascending: false })
+            .range(start, end);
 
-        const total = await CommunityPost.countDocuments(query);
+        if (error) throw error;
+
+        const mapped = (posts || []).map(p => ({
+            ...p,
+            _id: p.id,
+            createdAt: p.created_at,
+            sharedEntry: p.shared_entry ? {
+                ...p.shared_entry,
+                _id: p.shared_entry.id,
+                wordCount: p.shared_entry.word_count,
+                author: p.shared_entry.author ? {
+                    ...p.shared_entry.author,
+                    _id: p.shared_entry.author.id,
+                    displayName: p.shared_entry.author.display_name
+                } : null
+            } : null,
+            author: p.author ? {
+                ...p.author,
+                _id: p.author.id,
+                displayName: p.author.display_name
+            } : null
+        }));
 
         res.json({
-            posts,
+            posts: mapped,
             page,
-            totalPages: Math.ceil(total / limit),
-            total
+            totalPages: Math.ceil((count || 0) / limit),
+            total: count || 0
         });
     } catch (error) {
         res.status(500).json({ error: error.message });
@@ -79,21 +135,37 @@ router.get('/community/:communityId', async (req, res) => {
 // Pin post (owner/mod)
 router.put('/:id/pin', auth, async (req, res) => {
     try {
-        const post = await CommunityPost.findById(req.params.id);
-        if (!post) {
+        // First get the post and community details
+        const { data: postWithCommunity, error: fetchError } = await supabase
+            .from('community_posts')
+            .select(`
+                id, pinned, community,
+                community_details:communities!community_posts_community_fkey(owner, moderators)
+            `)
+            .eq('id', req.params.id)
+            .single();
+
+        if (fetchError || !postWithCommunity) {
             return res.status(404).json({ error: 'Post not found' });
         }
 
-        const community = await Community.findById(post.community);
-        const isOwner = community.owner.toString() === req.user.id;
-        const isMod = community.moderators.includes(req.user.id);
+        const community = postWithCommunity.community_details;
+        const isOwner = community.owner === req.user.id;
+        const isMod = (community.moderators || []).includes(req.user.id);
+        
         if (!isOwner && !isMod) {
             return res.status(403).json({ error: 'Not authorized' });
         }
 
-        post.pinned = !post.pinned;
-        await post.save();
-        res.json(post);
+        const { data: updatedPost, error } = await supabase
+            .from('community_posts')
+            .update({ pinned: !postWithCommunity.pinned })
+            .eq('id', req.params.id)
+            .select()
+            .single();
+
+        if (error) throw error;
+        res.json({ ...updatedPost, _id: updatedPost.id });
     } catch (error) {
         res.status(500).json({ error: error.message });
     }
@@ -102,20 +174,30 @@ router.put('/:id/pin', auth, async (req, res) => {
 // Like post
 router.post('/:id/like', auth, async (req, res) => {
     try {
-        const post = await CommunityPost.findById(req.params.id);
-        if (!post) {
+        const { data: post, error: fetchError } = await supabase
+            .from('community_posts')
+            .select('id, likes')
+            .eq('id', req.params.id)
+            .single();
+
+        if (fetchError || !post) {
             return res.status(404).json({ error: 'Post not found' });
         }
 
-        const isLiked = post.likes.includes(req.user.id);
-        if (isLiked) {
-            post.likes.pull(req.user.id);
-        } else {
-            post.likes.push(req.user.id);
-        }
+        const likes = post.likes || [];
+        const isLiked = likes.includes(req.user.id);
+        const newLikes = isLiked 
+            ? likes.filter(id => id !== req.user.id)
+            : [...likes, req.user.id];
 
-        await post.save();
-        res.json({ isLiked: !isLiked, likesCount: post.likes.length });
+        const { error } = await supabase
+            .from('community_posts')
+            .update({ likes: newLikes })
+            .eq('id', req.params.id);
+
+        if (error) throw error;
+        
+        res.json({ isLiked: !isLiked, likesCount: newLikes.length });
     } catch (error) {
         res.status(500).json({ error: error.message });
     }
@@ -124,21 +206,34 @@ router.post('/:id/like', auth, async (req, res) => {
 // Delete post
 router.delete('/:id', auth, async (req, res) => {
     try {
-        const post = await CommunityPost.findById(req.params.id);
-        if (!post) {
+        const { data: postWithCommunity, error: fetchError } = await supabase
+            .from('community_posts')
+            .select(`
+                id, author,
+                community_details:communities!community_posts_community_fkey(owner, moderators)
+            `)
+            .eq('id', req.params.id)
+            .single();
+
+        if (fetchError || !postWithCommunity) {
             return res.status(404).json({ error: 'Post not found' });
         }
 
-        const community = await Community.findById(post.community);
-        const isAuthor = post.author.toString() === req.user.id;
-        const isOwner = community.owner.toString() === req.user.id;
-        const isMod = community.moderators.includes(req.user.id);
+        const community = postWithCommunity.community_details;
+        const isAuthor = postWithCommunity.author === req.user.id;
+        const isOwner = community.owner === req.user.id;
+        const isMod = (community.moderators || []).includes(req.user.id);
 
         if (!isAuthor && !isOwner && !isMod) {
             return res.status(403).json({ error: 'Not authorized' });
         }
 
-        await CommunityPost.findByIdAndDelete(post._id);
+        const { error } = await supabase
+            .from('community_posts')
+            .delete()
+            .eq('id', req.params.id);
+
+        if (error) throw error;
         res.json({ message: 'Post deleted' });
     } catch (error) {
         res.status(500).json({ error: error.message });

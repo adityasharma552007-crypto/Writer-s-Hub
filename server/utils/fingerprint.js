@@ -1,6 +1,6 @@
 const crypto = require('crypto');
 const stringSimilarity = require('string-similarity');
-const Entry = require('../models/Entry');
+const { supabase } = require('../supabaseClient');
 
 // Normalize text: lowercase, collapse whitespace, remove punctuation
 const normalizeText = (text) => {
@@ -43,37 +43,40 @@ const checkSimilarity = (newText, existingTexts, threshold = 0.85) => {
 const checkPlagiarism = async (newText, authorId) => {
     // First check hash collision
     const hash = generateHash(newText);
-    const hashMatch = await Entry.findOne({
-        contentHash: hash,
-        author: { $ne: authorId },
-        visibility: 'published'
-    }).populate('author', 'username displayName');
+    const { data: hashMatch } = await supabase
+        .from('entries')
+        .select('id, title, author:profiles!author(username, display_name)')
+        .eq('content_hash', hash)
+        .neq('author', authorId)
+        .eq('visibility', 'published')
+        .maybeSingle();
 
     if (hashMatch) {
         return [{
             similarity: 100,
-            entryId: hashMatch._id,
+            entryId: hashMatch.id,
             title: hashMatch.title,
-            author: hashMatch.author.displayName || hashMatch.author.username
+            author: hashMatch.author.display_name || hashMatch.author.username
         }];
     }
 
     // Fuzzy check against recent published entries
-    const recentEntries = await Entry.find({
-        author: { $ne: authorId },
-        visibility: 'published',
-        body: { $exists: true, $ne: '' }
-    })
-        .sort({ createdAt: -1 })
-        .limit(100)
-        .select('title body author')
-        .populate('author', 'username displayName');
+    const { data: recentData } = await supabase
+        .from('entries')
+        .select('id, title, body, author:profiles!author(username, display_name)')
+        .neq('author', authorId)
+        .eq('visibility', 'published')
+        .neq('body', '')
+        .order('created_at', { ascending: false })
+        .limit(100);
+
+    const recentEntries = recentData || [];
 
     const existingTexts = recentEntries.map(e => ({
         text: e.body,
-        entryId: e._id,
+        entryId: e.id,
         title: e.title,
-        author: e.author.displayName || e.author.username
+        author: e.author.display_name || e.author.username
     }));
 
     return checkSimilarity(newText, existingTexts);

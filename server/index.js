@@ -2,13 +2,9 @@ require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const path = require('path');
-const connectDB = require('./config/db');
 
 const app = express();
 const PORT = process.env.PORT || 5000;
-
-// Connect to MongoDB
-connectDB();
 
 // Middleware
 app.use(cors({ origin: 'http://localhost:5173', credentials: true }));
@@ -21,19 +17,19 @@ app.get('/api/health', (req, res) => {
     res.json({ status: 'ok' });
 });
 
-// Routes
+// Routes Migrated to Supabase
+app.use('/api/shelves', require('./routes/shelves'));
+app.use('/api/feed', require('./routes/feed'));
+app.use('/api/notifications', require('./routes/notifications'));
 app.use('/api/auth', require('./routes/auth'));
 app.use('/api/users', require('./routes/users'));
-app.use('/api/shelves', require('./routes/shelves'));
 app.use('/api/entries', require('./routes/entries'));
 app.use('/api/comments', require('./routes/comments'));
 app.use('/api/bookmarks', require('./routes/bookmarks'));
 app.use('/api/reposts', require('./routes/reposts'));
 app.use('/api/search', require('./routes/search'));
-app.use('/api/feed', require('./routes/feed'));
 app.use('/api/communities', require('./routes/communities'));
 app.use('/api/community-posts', require('./routes/communityPosts'));
-app.use('/api/notifications', require('./routes/notifications'));
 app.use('/api/reports', require('./routes/reports'));
 
 // Error handling
@@ -47,3 +43,4 @@ app.listen(PORT, () => {
 });
 
 module.exports = app;
+// Trigger restart

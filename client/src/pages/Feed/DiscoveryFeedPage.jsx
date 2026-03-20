@@ -12,9 +12,9 @@ export default function DiscoveryFeedPage() {
     const [loading, setLoading] = useState(true);
 
     useEffect(() => {
-        if (user) {
+        if (user?.id || user?._id) {
             api.get('/feed').then(({ data }) => setFeed(data)).catch(() => { }).finally(() => setLoading(false));
-        } else {
+        } else if (user === null) {
             api.get('/feed/trending').then(({ data }) => setPublicTrending(data.entries)).catch(() => { }).finally(() => setLoading(false));
         }
     }, [user]);
